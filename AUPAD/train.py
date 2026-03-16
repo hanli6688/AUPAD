@@ -10,10 +10,9 @@ import argparse
 import json
 import torch
 
-# Importing from local modules
 from tools import write2csv, setup_paths, setup_seed, log_metrics, Logger
 from dataset import get_data
-from method import HKD_Trainer
+from method import AUPAD_Trainer   # 修改
 
 setup_seed(116)
 
@@ -30,7 +29,6 @@ def train(args):
     image_size = args.image_size
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-
     save_fig = args.save_fig
 
     # ==============================
@@ -38,7 +36,6 @@ def train(args):
     # ==============================
 
     model_name, image_dir, csv_path, log_path, ckp_path, tensorboard_logger = setup_paths(args)
-
     logger = Logger(log_path)
 
     for key, value in sorted(vars(args).items()):
@@ -60,18 +57,20 @@ def train(args):
     features_list = [substage, substage * 2, substage * 3, substage * 4]
 
     # ==============================
-    # HKD Model
+    # AUPAD Model
     # ==============================
 
-    model = HKD_Trainer(
+    model = AUPAD_Trainer(
         backbone=args.model,
         feat_list=features_list,
         input_dim=model_configs['vision_cfg']['width'],
         embed_dim=model_configs['embed_dim'],
 
-        teacher_model=args.teacher_model,
-        distill_weight=args.distill_weight,
-        idag_weight=args.idag_weight,
+        # AUPAD modules
+        prompt_length=args.prompt_length,
+        prompt_depth=args.prompt_depth,
+        memory_size=args.memory_size,
+        k_clusters=args.k_clusters,
 
         learning_rate=learning_rate,
         device=device,
@@ -127,8 +126,8 @@ def train(args):
         loss_dict = model.train_epoch(train_dataloader)
 
         loss_total = loss_dict["total"]
-        loss_kd = loss_dict["distill"]
-        loss_idag = loss_dict["idag"]
+        loss_prompt = loss_dict["prompt"]
+        loss_abnormal = loss_dict["abnormal"]
 
         # ==============================
         # Logging
@@ -137,32 +136,18 @@ def train(args):
         if (epoch + 1) % args.print_freq == 0:
 
             logger.info(
-                'epoch [{}/{}], total:{:.4f}, kd:{:.4f}, idag:{:.4f}'.format(
+                'epoch [{}/{}], total:{:.4f}, prompt:{:.4f}, abnormal:{:.4f}'.format(
                     epoch + 1,
                     epochs,
                     loss_total,
-                    loss_kd,
-                    loss_idag
+                    loss_prompt,
+                    loss_abnormal
                 )
             )
 
-            tensorboard_logger.add_scalar(
-                'loss/total',
-                loss_total,
-                epoch
-            )
-
-            tensorboard_logger.add_scalar(
-                'loss/kd',
-                loss_kd,
-                epoch
-            )
-
-            tensorboard_logger.add_scalar(
-                'loss/idag',
-                loss_idag,
-                epoch
-            )
+            tensorboard_logger.add_scalar('loss/total', loss_total, epoch)
+            tensorboard_logger.add_scalar('loss/prompt', loss_prompt, epoch)
+            tensorboard_logger.add_scalar('loss/abnormal', loss_abnormal, epoch)
 
         # ==============================
         # Validation
@@ -170,10 +155,7 @@ def train(args):
 
         if (epoch + 1) % args.valid_freq == 0 or (epoch == epochs - 1):
 
-            if epoch == epochs - 1:
-                save_fig_flag = save_fig
-            else:
-                save_fig_flag = False
+            save_fig_flag = save_fig if epoch == epochs - 1 else False
 
             logger.info('=============================Testing ====================================')
 
@@ -203,7 +185,6 @@ def train(args):
                     write2csv(metric_dict[k], test_data_cls_names, k, csv_path)
 
                 ckp_path_best = ckp_path + '_best.pth'
-
                 model.save(ckp_path_best)
 
                 best_f1 = f1_px
@@ -215,30 +196,15 @@ def str2bool(v):
 
 if __name__ == '__main__':
 
-    parser = argparse.ArgumentParser("HKD", add_help=True)
+    parser = argparse.ArgumentParser("AUPAD", add_help=True)
 
     # ==============================
     # Dataset
     # ==============================
 
-    parser.add_argument(
-        "--training_data",
-        type=str,
-        default=["mvtec", "colondb"],
-        nargs='+'
-    )
-
-    parser.add_argument(
-        "--testing_data",
-        type=str,
-        default="visa"
-    )
-
-    parser.add_argument(
-        "--save_path",
-        type=str,
-        default='./workspaces'
-    )
+    parser.add_argument("--training_data", type=str, default=["mvtec", "colondb"], nargs='+')
+    parser.add_argument("--testing_data", type=str, default="visa")
+    parser.add_argument("--save_path", type=str, default='./workspaces')
 
     # ==============================
     # CLIP backbone
@@ -251,97 +217,32 @@ if __name__ == '__main__':
         choices=["ViT-B-16", "ViT-B-32", "ViT-L-14", "ViT-L-14-336"]
     )
 
-    parser.add_argument(
-        "--teacher_model",
-        type=str,
-        default="ViT-L-14"
-    )
-
-    parser.add_argument(
-        "--save_fig",
-        type=str2bool,
-        default=False
-    )
-
-    parser.add_argument(
-        "--ckt_path",
-        type=str,
-        default=''
-    )
+    parser.add_argument("--save_fig", type=str2bool, default=False)
 
     # ==============================
     # Training parameters
     # ==============================
 
-    parser.add_argument(
-        "--exp_indx",
-        type=int,
-        default=0
-    )
-
-    parser.add_argument(
-        "--epoch",
-        type=int,
-        default=5
-    )
-
-    parser.add_argument(
-        "--learning_rate",
-        type=float,
-        default=0.01
-    )
-
-    parser.add_argument(
-        "--batch_size",
-        type=int,
-        default=1
-    )
-
-    parser.add_argument(
-        "--image_size",
-        type=int,
-        default=518
-    )
-
-    parser.add_argument(
-        "--print_freq",
-        type=int,
-        default=1
-    )
-
-    parser.add_argument(
-        "--valid_freq",
-        type=int,
-        default=1
-    )
+    parser.add_argument("--exp_indx", type=int, default=0)
+    parser.add_argument("--epoch", type=int, default=5)
+    parser.add_argument("--learning_rate", type=float, default=0.01)
+    parser.add_argument("--batch_size", type=int, default=1)
+    parser.add_argument("--image_size", type=int, default=518)
+    parser.add_argument("--print_freq", type=int, default=1)
+    parser.add_argument("--valid_freq", type=int, default=1)
 
     # ==============================
-    # HKD parameters
+    # AUPAD parameters
     # ==============================
 
-    parser.add_argument(
-        "--distill_weight",
-        type=float,
-        default=1.0
-    )
-
-    parser.add_argument(
-        "--idag_weight",
-        type=float,
-        default=0.5
-    )
-
-    parser.add_argument(
-        "--k_clusters",
-        type=int,
-        default=20
-    )
+    parser.add_argument("--prompt_length", type=int, default=8)
+    parser.add_argument("--prompt_depth", type=int, default=4)
+    parser.add_argument("--memory_size", type=int, default=100)
+    parser.add_argument("--k_clusters", type=int, default=20)
 
     args = parser.parse_args()
 
     if args.batch_size != 1:
-        raise NotImplementedError(
-            "Currently, only batch size of 1 is supported."
-        )
+        raise NotImplementedError("Currently, only batch size of 1 is supported.")
 
     train(args)
